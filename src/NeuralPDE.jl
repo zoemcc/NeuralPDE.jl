@@ -11,6 +11,7 @@ using Quadrature
 using QuasiMonteCarlo
 using RuntimeGeneratedFunctions
 using SciMLBase
+using Logging
 import Tracker, Optim
 import ModelingToolkit: value, nameof, toexpr, build_expr, expand_derivatives
 import SciMLBase: @add_kwonly

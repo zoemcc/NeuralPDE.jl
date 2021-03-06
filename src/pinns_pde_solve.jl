@@ -12,12 +12,13 @@ Arguments:
 """
 abstract type AbstractPINN{isinplace} <: SciMLBase.SciMLProblem end
 
-struct PhysicsInformedNN{isinplace,C,T,P,PH,DER,K} <: AbstractPINN{isinplace}
+struct PhysicsInformedNN{isinplace,C,T,P,PH,DER,ITER,K} <: AbstractPINN{isinplace}
   chain::C
   strategy::T
   init_params::P
   phi::PH
   derivative::DER
+  iteration_count::ITER
   kwargs::K
 
  @add_kwonly function PhysicsInformedNN{iip}(chain,
@@ -25,6 +26,7 @@ struct PhysicsInformedNN{isinplace,C,T,P,PH,DER,K} <: AbstractPINN{isinplace}
                                              init_params = nothing,
                                              phi = nothing,
                                              derivative = nothing,
+                                             iteration_count = nothing,
                                              kwargs...) where iip
         if init_params == nothing
             if chain isa AbstractArray
@@ -52,7 +54,13 @@ struct PhysicsInformedNN{isinplace,C,T,P,PH,DER,K} <: AbstractPINN{isinplace}
         else
             _derivative = derivative
         end
-        new{iip,typeof(chain),typeof(strategy),typeof(initθ),typeof(_phi),typeof(_derivative),typeof(kwargs)}(chain,strategy,initθ,_phi,_derivative, kwargs)
+
+        if iteration_count == nothing
+            _iteration_count = [1]
+        else
+            _iteration_count = iteration_count
+        end
+        new{iip,typeof(chain),typeof(strategy),typeof(initθ),typeof(_phi),typeof(_derivative),typeof(_iteration_count),typeof(kwargs)}(chain,strategy,initθ,_phi,_derivative,_iteration_count,kwargs)
     end
 end
 PhysicsInformedNN(chain,strategy,args...;kwargs...) = PhysicsInformedNN{true}(chain,strategy,args...;kwargs...)
@@ -500,8 +508,9 @@ end
 function get_loss_function(loss_functions, train_sets, strategy::GridTraining;τ=nothing)
     # norm coefficient for loss function
     if τ == nothing
-        τ_ = loss_functions isa Array ? sum(length(train_set) for train_set in train_sets) : length(train_sets)
-        τ = 1.0f0 / τ_
+        #τ_ = loss_functions isa Array ? sum(length(train_set) for train_set in train_sets) : length(train_sets)
+        #τ = 1.0f0 / τ_
+        τs = loss_functions isa Array ? [1.0f0 / length(train_set) for train_set in train_sets] : [1.0f0 / length(train_sets)]
     end
 
     function inner_loss(loss_function,x,θ)
@@ -513,7 +522,8 @@ function get_loss_function(loss_functions, train_sets, strategy::GridTraining;τ
         train_sets = [train_sets]
     end
     f = (loss,train_set,θ) -> sum([inner_loss(loss,x,θ) for x in train_set])
-    loss = (θ) ->  τ * sum(f(loss_function,train_set,θ) for (loss_function,train_set) in zip(loss_functions,train_sets))
+    #loss = (θ) ->  τ * sum(f(loss_function,train_set,θ) for (loss_function,train_set) in zip(loss_functions,train_sets))
+    loss = (θ) ->  sum(τ_i * f(loss_function,train_set,θ) for (loss_function,train_set,τ_i) in zip(loss_functions,train_sets,τs))
     return loss
 end
 
@@ -648,6 +658,26 @@ function DiffEqBase.discretize(pde_system::PDESystem, discretization::PhysicsInf
     eqs = pde_system.eqs
     bcs = pde_system.bcs
 
+    @show discretization.kwargs
+    iter_count_array = discretization.iteration_count
+
+    l2_regularization_weight = get(discretization.kwargs, :l2_regularization_weight, 0.0)
+    pde_loss_weights = get(discretization.kwargs, :century_pde_loss_schedule, [1.0])
+
+    log_dir_or_empty = get(discretization.kwargs, :experiment_dir, "")
+    do_log = log_dir_or_empty != ""
+    if do_log
+        log_file = joinpath(log_dir_or_empty, "log.csv")
+        io = open(log_file, "w")
+        logger = SimpleLogger(io)
+        @show log_file, logger
+    else
+        log_file = ""
+        logger = nothing
+    end
+
+
+
     domains = pde_system.domain
     # dimensionality of equation
     dim = length(domains)
@@ -781,8 +811,38 @@ function DiffEqBase.discretize(pde_system::PDESystem, discretization::PhysicsInf
         (pde_loss_function, bc_loss_function)
     end
 
+    
+    if do_log
+        with_logger(logger) do 
+            @info join(["loss", "pde_loss", "bc_loss", "pde_loss_weight_century", "iter_count_val", "regularizer", "l2_regularization_weight"], ", ")
+        end
+    end
+
+
     function loss_function_(θ,p)
-        return pde_loss_function(θ) + bc_loss_function(θ)
+        iter_count_val = iter_count_array[1]
+
+        century = Int64(ceil(iter_count_val / 100))
+        clippedcentury = min(century, length(pde_loss_weights))
+        pde_loss_weight_century = pde_loss_weights[clippedcentury]
+        pde_loss = pde_loss_function(θ)
+
+        bc_loss = bc_loss_function(θ) 
+
+        regularizer = Float64(sum(abs2, θ)) / length(θ)
+
+        loss = pde_loss_weight_century * pde_loss + bc_loss + l2_regularization_weight * regularizer
+        Zygote.ignore() do
+            println("loss, pde_loss, bc_loss, pde_loss_weight_century, iter_count_val, regularizer, l2_regularization_weight")
+            println("$(loss), $(pde_loss), $(bc_loss), $(pde_loss_weight_century), $(iter_count_val), $(regularizer), $(l2_regularization_weight)")
+            if do_log
+                with_logger(logger) do 
+                    @info join(string.([loss, pde_loss, bc_loss, pde_loss_weight_century, iter_count_val, regularizer, l2_regularization_weight]), ", ")
+                end
+            end
+        end
+
+        return loss 
     end
 
     f = OptimizationFunction(loss_function_, GalacticOptim.AutoZygote())
