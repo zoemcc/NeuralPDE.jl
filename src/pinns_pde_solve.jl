@@ -1023,25 +1023,26 @@ function SciMLBase.discretize(pde_system::PDESystem, discretization::PhysicsInfo
     filename_pde_loss = "/home/zobot/.julia/dev/NeuralPDEWatson/data/stochastic_128_first/pde_loss.csv"
     rm(filename_bc_loss; force=true)
     rm(filename_pde_loss; force=true)
+    saveevery = 200
+    pde_loss_record = zeros(Float32, saveevery)
+    bc_loss_record = zeros(Float32, saveevery)
 
     function loss_function_(θ,p)
         Zygote.@ignore reweight_losses(θ)
         adaloss = discretization.adaptive_loss
 
         weighted_pde_loss = adaloss.pde_loss_weights[1] * pde_loss_function(θ)
+        weighted_bc_loss = adaloss.bc_loss_weights[1] * bc_loss_function(θ)
+
         Zygote.@ignore begin
             @show weighted_pde_loss
-            if adaloss.i % 100 == 0
-                df = DataFrame(pde_loss=weighted_pde_loss)
-                CSV.write(filename_pde_loss, df, writeheader=false, append=true)
-            end
-        end
-
-        weighted_bc_loss = adaloss.bc_loss_weights[1] * bc_loss_function(θ)
-        Zygote.@ignore begin
             @show weighted_bc_loss
-            if adaloss.i % 100 == 0
-                df = DataFrame(bc_loss=weighted_bc_loss)
+            pde_loss_record[((adaloss.i - 1) % saveevery) + 1] = weighted_pde_loss
+            bc_loss_record[((adaloss.i - 1) % saveevery) + 1] = weighted_bc_loss
+            if adaloss.i % saveevery == 0
+                df = DataFrame(pde_loss=pde_loss_record)
+                CSV.write(filename_pde_loss, df, writeheader=false, append=true)
+                df = DataFrame(bc_loss=bc_loss_record)
                 CSV.write(filename_bc_loss, df, writeheader=false, append=true)
             end
         end
