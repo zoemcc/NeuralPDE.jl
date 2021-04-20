@@ -1,4 +1,6 @@
 import Base.Broadcast
+using DataFrames
+using CSV
 Base.Broadcast.dottable(x::Function) = true
 RuntimeGeneratedFunctions.init(@__MODULE__)
 """
@@ -147,12 +149,13 @@ end
 struct ReturnOne end
 
 Base.getindex(ReturnOne, i) = 1
-struct NonAdaptiveLossWeights <: AdaptiveLosses
+mutable struct NonAdaptiveLossWeights <: AdaptiveLosses
+    i::Int64
     pde_loss_weights::ReturnOne
     bc_loss_weights::ReturnOne 
     additional_loss_weights::ReturnOne 
-    function NonAdaptiveLossWeights()
-        new(ReturnOne(), ReturnOne(), ReturnOne())
+    function NonAdaptiveLossWeights(i=0)
+        new(convert(Int64, i), ReturnOne(), ReturnOne(), ReturnOne())
     end
 end
 
@@ -1011,20 +1014,37 @@ function SciMLBase.discretize(pde_system::PDESystem, discretization::PhysicsInfo
     else
         function run_nonadaptive_loss(θ)
             println("No adaptive loss")
+            discretization.adaptive_loss.i += 1
             nothing
         end
     end
 
+    filename_bc_loss = "/home/zobot/.julia/dev/NeuralPDEWatson/data/stochastic_128_first/bc_loss.csv"
+    filename_pde_loss = "/home/zobot/.julia/dev/NeuralPDEWatson/data/stochastic_128_first/pde_loss.csv"
+    rm(filename_bc_loss; force=true)
+    rm(filename_pde_loss; force=true)
 
     function loss_function_(θ,p)
         Zygote.@ignore reweight_losses(θ)
         adaloss = discretization.adaptive_loss
 
         weighted_pde_loss = adaloss.pde_loss_weights[1] * pde_loss_function(θ)
-        Zygote.@ignore @show weighted_pde_loss
+        Zygote.@ignore begin
+            @show weighted_pde_loss
+            if adaloss.i % 100 == 0
+                df = DataFrame(pde_loss=weighted_pde_loss)
+                CSV.write(filename_pde_loss, df, writeheader=false, append=true)
+            end
+        end
 
         weighted_bc_loss = adaloss.bc_loss_weights[1] * bc_loss_function(θ)
-        Zygote.@ignore @show weighted_bc_loss
+        Zygote.@ignore begin
+            @show weighted_bc_loss
+            if adaloss.i % 100 == 0
+                df = DataFrame(bc_loss=weighted_bc_loss)
+                CSV.write(filename_bc_loss, df, writeheader=false, append=true)
+            end
+        end
 
         weighted_additional_loss = 
         if additional_loss isa Nothing
