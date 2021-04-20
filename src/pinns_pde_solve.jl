@@ -854,7 +854,8 @@ function SciMLBase.discretize(pde_system::PDESystem, discretization::PhysicsInfo
           bcs_dim = isempty(maximum(size.(bcs_bounds[1]))) ? nothing : maximum(size.(bcs_bounds))[1]
           bcs_cond_size = size(bcs_bounds)[1]
 
-          points = bcs_dim == nothing ? 1 : bcs_cond_size*Int(round(strategy.points^(bcs_dim/pde_dim)))
+          points = bcs_dim == nothing ? 1 : strategy.points
+          #points = bcs_dim == nothing ? 1 : bcs_cond_size*Int(round(strategy.points^(bcs_dim/pde_dim)))
           strategy_ = StochasticTraining(points)
 
           bc_loss_function = get_loss_function(_bc_loss_functions,
@@ -968,7 +969,7 @@ function SciMLBase.discretize(pde_system::PDESystem, discretization::PhysicsInfo
                 @show pde_grad_max
                 @show bc_grad_mean
 
-                bc_loss_weight_new = pde_grad_max / (bc_grad_mean + 1e-5)
+                bc_loss_weight_new = pde_grad_max / (bc_grad_mean + 1e-7)
                 α = discretization.adaptive_loss.α
                 discretization.adaptive_loss.bc_loss_weights[1] = α * discretization.adaptive_loss.bc_loss_weights[1] + (1 - α) * bc_loss_weight_new
                 @show discretization.adaptive_loss.bc_loss_weights[1]

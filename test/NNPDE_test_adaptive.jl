@@ -24,6 +24,7 @@ cb = function (p,l)
 end
 end
 
+#=
 begin
 println("Example 1, 1D ode")
 @parameters θ
@@ -48,8 +49,10 @@ middle_layers = [FastDense(numh, numh, nonlin) for i in 1:num_hid]
 chain = FastChain(FastDense(1,numh,nonlin),middle_layers..., FastDense(numh,1))
 initθ = DiffEqFlux.initial_params(chain)
 
-strategy = NeuralPDE.StochasticTraining(128)
-#strategy = NeuralPDE.QuadratureTraining()
+#strategy = NeuralPDE.StochasticTraining(128)
+#strategy = NeuralPDE.QuadratureTraining(;quadrature_alg=CubaSUAVE())
+strategy = NeuralPDE.QuadratureTraining(;quadrature_alg=CubaVegas())
+#strategy = NeuralPDE.QuadratureTraining(;abstol=1e-5, reltol=1e-7, maxiters=3000)
 #adaloss = NeuralPDE.LossGradientsAdaptiveLoss(20; α=0.95f0)
 adaloss = NeuralPDE.NonAdaptiveLossWeights()
 discretization = NeuralPDE.PhysicsInformedNN(chain,
@@ -64,8 +67,8 @@ pde_system = PDESystem(eq,bcs,domains,[θ],[u])
 prob = NeuralPDE.discretize(pde_system,discretization)
 sym_prob = NeuralPDE.symbolic_discretize(pde_system,discretization)
 
-opt = Flux.Optimiser(ExpDecay(1), ADAM(1e-1))
-res = GalacticOptim.solve(prob, opt; cb = cb, maxiters=5000)
+opt = Flux.Optimiser(ExpDecay(1), ADAM(1e-5))
+res = GalacticOptim.solve(prob, opt; cb = cb, maxiters=3000)
 #=
 prob2 = remake(prob,u0=res.minimizer)
 res = GalacticOptim.solve(prob2, ADAM(0.001); cb = cb, maxiters=10)
@@ -82,8 +85,10 @@ plot(t_plot ,u_real)
 plot!(t_plot ,u_predict)
 end
 
+=#
 
 
+begin
 @parameters x y
 @variables u(..)
 Dxx = Differential(x)^2
@@ -99,9 +104,13 @@ bcs = [u(0,y) ~ 0.f0, u(1,y) ~ -sin(pi*1)*sin(pi*y),
 domains = [x ∈ IntervalDomain(0.0,1.0),
             y ∈ IntervalDomain(0.0,1.0)]
 
-strategy_ = StochasticTraining(128)
-chain_ = FastChain(FastDense(2,24,Flux.σ),FastDense(24,24,Flux.σ),FastDense(24,1))
-adalosspoisson = NeuralPDE.LossGradientsAdaptiveLoss(20; α=0.95f0)
+#strategy_ = StochasticTraining(256)
+num_dim = 24
+nonlin = Flux.σ
+strategy_ = NeuralPDE.QuadratureTraining(;abstol=1e-6, reltol=1e-8, maxiters=2000)
+chain_ = FastChain(FastDense(2,num_dim,nonlin),FastDense(num_dim,num_dim,nonlin),FastDense(num_dim,1))
+adalosspoisson = NeuralPDE.LossGradientsAdaptiveLoss(20; α=0.9f0)
+#adalosspoisson = NeuralPDE.NonAdaptiveLossWeights()
 discretization = NeuralPDE.PhysicsInformedNN(chain_,
                                                 strategy_,
                                                 adaptive_loss=adalosspoisson)
@@ -109,7 +118,7 @@ discretization = NeuralPDE.PhysicsInformedNN(chain_,
 pde_system = PDESystem(eq,bcs,domains,[x,y],[u])
 prob = NeuralPDE.discretize(pde_system,discretization)
 sym_prob = NeuralPDE.symbolic_discretize(pde_system,discretization)
-res = GalacticOptim.solve(prob, ADAM(0.001); cb = cb, maxiters=5000)
+res = GalacticOptim.solve(prob, ADAM(3e-4); cb = cb, maxiters=500)
 phi = discretization.phi
 
 dx = 0.1
@@ -126,3 +135,4 @@ p1 = plot(xs, ys, u_real, linetype=:contourf,title = "analytic");
 p2 = plot(xs, ys, u_predict, linetype=:contourf,title = "predict");
 p3 = plot(xs, ys, diff_u,linetype=:contourf,title = "error");
 plot(p1,p2,p3)
+end
