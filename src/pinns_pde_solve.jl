@@ -1019,8 +1019,9 @@ function SciMLBase.discretize(pde_system::PDESystem, discretization::PhysicsInfo
         end
     end
 
-    filename_bc_loss = "/home/zobot/.julia/dev/NeuralPDEWatson/data/stochastic_128_first/bc_loss.csv"
-    filename_pde_loss = "/home/zobot/.julia/dev/NeuralPDEWatson/data/stochastic_128_first/pde_loss.csv"
+    exp_name = "stochastic_rescaled_in_pde_losses_1e3_1e_4_3e0"
+    filename_bc_loss = "/home/zobot/.julia/dev/NeuralPDEWatson/data/$(exp_name)/bc_loss.csv"
+    filename_pde_loss = "/home/zobot/.julia/dev/NeuralPDEWatson/data/$(exp_name)/pde_loss.csv"
     rm(filename_bc_loss; force=true)
     rm(filename_pde_loss; force=true)
     saveevery = 200
