@@ -978,9 +978,75 @@ function SciMLBase.discretize(pde_system::PDESystem, discretization::PhysicsInfo
                                                        strategy)
          (pde_loss_function, bc_loss_function)
     elseif strategy isa QuadratureTraining
-        bounds = get_bounds(domains,bcs,dict_indvars,dict_depvars,strategy)
-        pde_bounds, bcs_bounds = bounds
-        plbs,pubs = pde_bounds
+        #bounds = get_bounds(domains,bcs,dict_indvars,dict_depvars,strategy)
+        #pde_bounds, bcs_bounds = bounds
+        function process_loss_bounds(loss_function, bounds, strategy)
+            # bounds is [[lb_1, ub_1], [lb_2, ub_2], ...] for vars 1, 2, ...
+            if length(bounds) > 0
+                lower_bounds = map(indvar_bound->indvar_bound[1], bounds)
+                upper_bounds = map(indvar_bound->indvar_bound[2], bounds)
+                input_bounds = ([lower_bounds], [upper_bounds])
+
+                if length(bounds) == 1 && strategy.quadrature_alg in [CubaCuhre(),CubaDivonne()]
+                    @warn "$(strategy.quadrature_alg) does not work with one-dimensional
+                    problems, so for the boundary conditions loss function,
+                    the quadrature algorithm was replaced by HCubatureJL"
+
+                    strategy = QuadratureTraining(quadrature_alg = HCubatureJL(),
+                                                reltol = strategy.reltol,
+                                                abstol = strategy.abstol,
+                                                maxiters = strategy.maxiters,
+                                                batch = strategy.batch)
+                end
+
+            else
+                # no integration occurs, just insert constant
+                strategy = StochasticTraining(1)
+                input_bounds = []
+            end
+            
+            τp = 1.0f0
+            output_loss_function = get_loss_function([loss_function],
+                                                input_bounds,
+                                                strategy;
+                                                τ=τp)
+            #τp = 1.0f0 / τ_
+        end
+
+        pde_loss_functions = map(1:length(pde_integration_vars)) do i
+            process_loss_bounds(_pde_loss_functions[i], pde_bounds[i], strategy) #bounds are N x [lower_bound_vars[I], upper_bound_vars[I]]
+        end
+        #pde_loss_function = θ -> sum(map(pde_loss_function_i->pde_loss_function_i(θ), pde_loss_functions))
+        pde_loss_function = θ -> begin 
+            total = 0.
+            for pde_loss_function_i in pde_loss_functions
+                total += pde_loss_function_i(θ)
+            end
+            total
+        end
+        bc_loss_functions = map(1:length(bc_integration_vars)) do i
+            process_loss_bounds(_bc_loss_functions[i], bcs_bounds[i], strategy) #bounds are N x [lower_bound_vars[I], upper_bound_vars[I]]
+        end
+        #bc_loss_function = θ -> sum(map(bc_loss_function_i->bc_loss_function_i(θ), bc_loss_functions))
+        bc_loss_function = θ -> begin 
+            total = 0.
+            for bc_loss_function_i in bc_loss_functions
+                total += bc_loss_function_i(θ)
+            end
+            total
+        end
+        #=
+        plbs = map(boundaries->boundaries[1], pde_bounds)
+        pubs = map(boundaries->boundaries[2], pde_bounds)
+        #plbs,pubs = pde_bounds
+        blbs = map(bcs_bounds) do boundaries
+            if length(boundaries) > 0
+                boundaries[1]
+            else
+
+            end
+        end
+        bubs = map(boundaries->boundaries[2], bcs_bounds)
         blbs,bubs = bcs_bounds
         pl = length(plbs[1])
         bl = length(blbs[1])
@@ -1033,6 +1099,7 @@ function SciMLBase.discretize(pde_system::PDESystem, discretization::PhysicsInfo
                                              strategy;
                                              τ=τb)
         end
+        =#
         (pde_loss_function, bc_loss_function)
     end
 
@@ -1040,12 +1107,16 @@ function SciMLBase.discretize(pde_system::PDESystem, discretization::PhysicsInfo
         if additional_loss isa Nothing
             return pde_loss_function(θ) + bc_loss_function(θ)
         else
-            function _additional_loss(phi,θ)
-                θ_ = θ[1:end - length(default_p)]
-                p = θ[(end - length(default_p) + 1):end]
-                return additional_loss(phi,θ_,p)
+            if param_estim
+                function _additional_loss(phi,θ)
+                    θ_ = θ[1:end - length(default_p)]
+                    p = θ[(end - length(default_p) + 1):end]
+                    return additional_loss(phi,θ_,p)
+                end
+                return pde_loss_function(θ) + bc_loss_function(θ) + _additional_loss(phi,θ)
+            else
+                return pde_loss_function(θ) + bc_loss_function(θ) + additional_loss(phi,θ)
             end
-            return pde_loss_function(θ) + bc_loss_function(θ) + _additional_loss(phi,θ)
         end
     end
 

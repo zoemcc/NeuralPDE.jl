@@ -1,3 +1,4 @@
+using Revise
 using Flux
 println("NNPDE_tests")
 using DiffEqFlux
