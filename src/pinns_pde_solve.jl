@@ -142,7 +142,7 @@ mutable struct LossGradientsAdaptiveLoss <: AdaptiveLosses
     bc_loss_weights::Vector{Float32} 
     additional_loss_weights::Vector{Float32} 
     SciMLBase.@add_kwonly function LossGradientsAdaptiveLoss(reweight_every; i=0, α=0.9f0)
-        new(convert(Int64, reweight_every), convert(Int64, i), α, Float32[], Float32[], Float32[])
+        new(convert(Int64, reweight_every), convert(Int64, i), convert(Float32, α), Float32[], Float32[], Float32[])
     end
 end
 
@@ -156,6 +156,21 @@ mutable struct NonAdaptiveLossWeights <: AdaptiveLosses
     additional_loss_weights::ReturnOne 
     function NonAdaptiveLossWeights(i=0)
         new(convert(Int64, i), ReturnOne(), ReturnOne(), ReturnOne())
+    end
+end
+
+"""
+Adaptive Loss struct for minimax adaptive loss structure.
+"""
+mutable struct MiniMaxAdaptiveLoss <: AdaptiveLosses
+    reweight_every::Int64
+    i::Int64
+    α::Float32
+    pde_loss_weights::Vector{Float32} # we seem to be hard coding Float32's often, this could be parameterized though
+    bc_loss_weights::Vector{Float32} 
+    additional_loss_weights::Vector{Float32} 
+    SciMLBase.@add_kwonly function MiniMaxAdaptiveLoss(reweight_every; i=0, α=0.01f0)
+        new(convert(Int64, reweight_every), convert(Int64, i), convert(Float32, α), Float32[], Float32[], Float32[])
     end
 end
 
@@ -985,13 +1000,8 @@ function SciMLBase.discretize(pde_system::PDESystem, discretization::PhysicsInfo
           bcs_dim = isempty(maximum(size.(bcs_bounds[1]))) ? nothing : maximum(size.(bcs_bounds))[1]
           bcs_cond_size = size(bcs_bounds)[1]
 
-<<<<<<< HEAD
-          points = bcs_dim == nothing ? 1 : strategy.points
-          #points = bcs_dim == nothing ? 1 : bcs_cond_size*Int(round(strategy.points^(bcs_dim/pde_dim)))
-=======
           points = bcs_dim == nothing ? 1 : bcs_cond_size*Int(round(strategy.points^(bcs_dim/pde_dim)))
           points = bcs_dim == nothing ? 1 : strategy.points 
->>>>>>> heterogeneous_input_spm_tests
           strategy_ = StochasticTraining(points)
           =#
 
@@ -1164,7 +1174,7 @@ function SciMLBase.discretize(pde_system::PDESystem, discretization::PhysicsInfo
 
         dump(discretization.adaptive_loss)
 
-        function run_adaptive_loss(θ)
+        function run_loss_gradients_adaptive_loss(θ)
             println("In adaptive loss")
             discretization.adaptive_loss.i += 1
             if discretization.adaptive_loss.i % discretization.adaptive_loss.reweight_every == 0
@@ -1186,6 +1196,38 @@ function SciMLBase.discretize(pde_system::PDESystem, discretization::PhysicsInfo
             nothing
         end
 
+    elseif discretization.adaptive_loss isa MiniMaxAdaptiveLoss
+        # initialize adaptive loss data structures 
+        # TODO ZDM: initially assume one loss for pde and one loss for bc and one loss for additional, expand later
+        println("In adaptive loss setup")
+        num_pde_loss = 1
+        num_bc_loss = 1
+        num_additional_loss = additional_loss isa Nothing ? 0 : 1
+
+        discretization.adaptive_loss.pde_loss_weights = ones(Float32, num_pde_loss)
+        discretization.adaptive_loss.bc_loss_weights = ones(Float32, num_bc_loss)
+        discretization.adaptive_loss.additional_loss_weights = ones(Float32, num_additional_loss)
+
+        dump(discretization.adaptive_loss)
+
+        function run_minimax_adaptive_loss(θ)
+            println("In adaptive loss")
+            discretization.adaptive_loss.i += 1
+            if discretization.adaptive_loss.i % discretization.adaptive_loss.reweight_every == 0
+                println("Doing adaptive loss reweighting")
+
+                pde_loss = pde_loss_function(θ)
+                bc_loss  = bc_loss_function(θ)
+
+                α = discretization.adaptive_loss.α
+                discretization.adaptive_loss.pde_loss_weights[1] += α * pde_loss
+                discretization.adaptive_loss.bc_loss_weights[1] += α * bc_loss
+                @show discretization.adaptive_loss.pde_loss_weights[1]
+                @show discretization.adaptive_loss.bc_loss_weights[1]
+            end
+
+            nothing
+        end
     else
         function run_nonadaptive_loss(θ)
             println("No adaptive loss")
