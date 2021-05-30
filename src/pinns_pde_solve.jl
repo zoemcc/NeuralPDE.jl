@@ -165,12 +165,17 @@ Adaptive Loss struct for minimax adaptive loss structure.
 mutable struct MiniMaxAdaptiveLoss <: AdaptiveLosses
     reweight_every::Int64
     i::Int64
-    α::Float32
+    α_pde::Float32
+    α_bc::Float32
+    pde_weights_start::Float32
+    bc_weights_start::Float32
     pde_loss_weights::Vector{Float32} # we seem to be hard coding Float32's often, this could be parameterized though
     bc_loss_weights::Vector{Float32} 
     additional_loss_weights::Vector{Float32} 
-    SciMLBase.@add_kwonly function MiniMaxAdaptiveLoss(reweight_every; i=0, α=0.01f0)
-        new(convert(Int64, reweight_every), convert(Int64, i), convert(Float32, α), Float32[], Float32[], Float32[])
+    SciMLBase.@add_kwonly function MiniMaxAdaptiveLoss(reweight_every; i=0,
+         α_pde=Float32(1e-4), α_bc=0.5f0, pde_weights_start=1e-2, bc_weights_start=1e-2)
+        new(convert(Int64, reweight_every), convert(Int64, i), convert(Float32, α_pde),convert(Float32, α_bc),
+        convert(Float32, pde_weights_start),convert(Float32, bc_weights_start), Float32[], Float32[], Float32[])
     end
 end
 
@@ -331,8 +336,8 @@ function parse_equation(eq,dict_indvars,dict_depvars, dict_depvar_input,chain,in
     left_expr = transform_expression(toexpr(eq_lhs),dict_indvars,dict_depvars, dict_depvar_input,chain,initθ,strategy)
     right_expr = transform_expression(toexpr(eq_rhs),dict_indvars,dict_depvars, dict_depvar_input,chain,initθ,strategy)
 
-    #left_expr = Broadcast.__dot__(left_expr)   #TODO: ZDM: the new way of filling args & constants to the phi inputs is broken by these
-    #right_expr = Broadcast.__dot__(right_expr)
+    left_expr = Broadcast.__dot__(left_expr)   #TODO: ZDM: the new way of filling args & constants to the phi inputs is broken by these
+    right_expr = Broadcast.__dot__(right_expr)
 
     loss_func = :($left_expr .- $right_expr)
 end
@@ -738,6 +743,10 @@ function get_u()
 end
 
 Base.Broadcast.broadcasted(::typeof(get_u()), cord, θ, phi) = get_u()(cord, θ, phi)
+Base.Broadcast.broadcasted(::typeof(vcat), input...) = vcat(input...)
+Base.Broadcast.broadcasted(::typeof(DiffEqBase.parameterless_type), input...) = DiffEqBase.parameterless_type(input...)
+Base.Broadcast.broadcasted(::typeof(adapt), input...) = adapt(input...)
+Base.Broadcast.broadcasted(::typeof(fill), input...) = fill(input...)
 
 # the method to calculate the derivative
 function get_numeric_derivative()
@@ -765,8 +774,8 @@ function get_loss_function(loss_functions, train_sets, strategy::GridTraining;τ
         τs = 1.0f0 ./ τs_
     end
 
-    loss = (θ) ->  sum(τ * sum(abs2,loss_function(train_set, θ)) for (loss_function,train_set,τ) in zip(loss_functions,train_sets,τs))
-    return loss
+    losses = [(θ) ->  τ * sum(abs2,loss_function(train_set, θ)) for (loss_function,train_set,τ) in zip(loss_functions,train_sets,τs)]
+    return losses
 end
 
 function generate_random_points(points, bound)
@@ -788,17 +797,15 @@ function get_loss_function(loss_functions, bounds, strategy::StochasticTraining;
         τ = 1.0f0 / points
     end
 
-    loss = (θ) -> begin
-        total = 0.
-        for (bound, loss_function) in zip(bounds, loss_functions)
+    losses = map(zip(bounds, loss_functions)) do (bound, loss_function)
+        (θ) -> begin
             sets = generate_random_points(points, bound)
             sets_ = adapt(DiffEqBase.parameterless_type(θ),sets)
-            total += τ * sum(abs2,loss_function(sets_,θ))
+            return τ * sum(abs2,loss_function(sets_,θ))
         end
-        return total
     end
 
-    return loss
+    return losses
 end
 
 function get_loss_function(loss_functions, bounds, strategy::QuasiRandomTraining;τ=nothing)
@@ -854,8 +861,9 @@ function get_loss_function(loss_functions, bounds, strategy::QuadratureTraining;
               abstol = strategy.abstol,
               maxiters = strategy.maxiters)[1])
     end
-    loss = (θ) -> τ*sum(f_(lb,ub,loss_,θ) for (lb,ub,loss_) in zip(lbs,ubs,loss_functions))
-    return loss
+    #loss = (θ) -> τ*sum(f_(lb,ub,loss_,θ) for (lb,ub,loss_) in zip(lbs,ubs,loss_functions))
+    losses = [(θ) -> τ*f_(lb,ub,loss_,θ) for (lb,ub,loss_) in zip(lbs,ubs,loss_functions)]
+    return losses
 end
 function SciMLBase.symbolic_discretize(pde_system::PDESystem, discretization::PhysicsInformedNN)
     eqs = pde_system.eqs
@@ -1058,14 +1066,18 @@ function SciMLBase.discretize(pde_system::PDESystem, discretization::PhysicsInfo
             else
                 # no integration occurs, just insert constant
                 strategy = StochasticTraining(1)
-                input_bounds = []
+                input_bounds = [0]
             end
             
             τp = 1.0f0
             output_loss_function = get_loss_function([loss_function],
                                                 input_bounds,
                                                 strategy;
-                                                τ=τp)
+                                                τ=τp)[1]
+            #if strategy isa QuadratureTraining
+                #output_loss_function = output_loss_function[1]
+            #end
+            #output_loss_function
             #τp = 1.0f0 / τ_
         end
 
@@ -1073,24 +1085,24 @@ function SciMLBase.discretize(pde_system::PDESystem, discretization::PhysicsInfo
             process_loss_bounds(_pde_loss_functions[i], pde_bounds[i], strategy) #bounds are N x [lower_bound_vars[I], upper_bound_vars[I]]
         end
         #pde_loss_function = θ -> sum(map(pde_loss_function_i->pde_loss_function_i(θ), pde_loss_functions))
-        pde_loss_function = θ -> begin 
-            total = 0.
-            for pde_loss_function_i in pde_loss_functions
-                total += pde_loss_function_i(θ)
-            end
-            total
-        end
+        #pde_loss_function = θ -> begin 
+            #total = 0.
+            #for pde_loss_function_i in pde_loss_functions
+                #total += pde_loss_function_i(θ)
+            #end
+            #total
+        #end
         bc_loss_functions = map(1:length(bc_integration_vars)) do i
             process_loss_bounds(_bc_loss_functions[i], bcs_bounds[i], strategy) #bounds are N x [lower_bound_vars[I], upper_bound_vars[I]]
         end
         #bc_loss_function = θ -> sum(map(bc_loss_function_i->bc_loss_function_i(θ), bc_loss_functions))
-        bc_loss_function = θ -> begin 
-            total = 0.
-            for bc_loss_function_i in bc_loss_functions
-                total += bc_loss_function_i(θ)
-            end
-            total
-        end
+        #bc_loss_function = θ -> begin 
+            #total = 0.
+            #for bc_loss_function_i in bc_loss_functions
+                #total += bc_loss_function_i(θ)
+            #end
+            #total
+        #end
         #=
         plbs = map(boundaries->boundaries[1], pde_bounds)
         pubs = map(boundaries->boundaries[2], pde_bounds)
@@ -1156,7 +1168,7 @@ function SciMLBase.discretize(pde_system::PDESystem, discretization::PhysicsInfo
                                              τ=τb)
         end
         =#
-        (pde_loss_function, bc_loss_function)
+        (pde_loss_functions, bc_loss_functions)
     end
 
     reweight_losses = 
@@ -1164,12 +1176,12 @@ function SciMLBase.discretize(pde_system::PDESystem, discretization::PhysicsInfo
         # initialize adaptive loss data structures 
         # TODO ZDM: initially assume one loss for pde and one loss for bc and one loss for additional, expand later
         println("In adaptive loss setup")
-        num_pde_loss = 1
-        num_bc_loss = 1
+        num_pde_losses = length(pde_loss_functions)
+        num_bc_losses = length(bc_loss_functions)
         num_additional_loss = additional_loss isa Nothing ? 0 : 1
 
-        discretization.adaptive_loss.pde_loss_weights = ones(Float32, num_pde_loss)
-        discretization.adaptive_loss.bc_loss_weights = ones(Float32, num_bc_loss)
+        discretization.adaptive_loss.pde_loss_weights = ones(Float32, num_pde_losses)
+        discretization.adaptive_loss.bc_loss_weights = ones(Float32, num_bc_losses)
         discretization.adaptive_loss.additional_loss_weights = ones(Float32, num_additional_loss)
 
         dump(discretization.adaptive_loss)
@@ -1179,18 +1191,21 @@ function SciMLBase.discretize(pde_system::PDESystem, discretization::PhysicsInfo
             discretization.adaptive_loss.i += 1
             if discretization.adaptive_loss.i % discretization.adaptive_loss.reweight_every == 0
                 println("Doing adaptive loss reweighting")
-                pde_grad = Zygote.gradient(pde_loss_function, θ)[1]
-                bc_grad = Zygote.gradient(bc_loss_function, θ)[1]
+                pde_grads_mean = [mean(abs.(Zygote.gradient(pde_loss_function, θ)[1])) for pde_loss_function in pde_loss_functions]
+                bc_grads_mean = [mean(abs.(Zygote.gradient(bc_loss_function, θ)[1])) for bc_loss_function in bc_loss_functions]
 
-                pde_grad_max = maximum(abs.(pde_grad))
-                bc_grad_mean = mean(abs.(bc_grad))
-                @show pde_grad_max
-                @show bc_grad_mean
+                #pde_grad_max = maximum(abs.(pde_grad))
+                #bc_grad_mean = mean(abs.(bc_grad))
+                @show pde_grads_mean
+                @show bc_grads_mean
 
-                bc_loss_weight_new = pde_grad_max / (bc_grad_mean + 1e-7)
+                pde_loss_weights_new = 1 ./ (pde_grads_mean .+ 1e-7)
+                bc_loss_weights_new = 1 ./ (bc_grads_mean .+ 1e-7)
                 α = discretization.adaptive_loss.α
-                discretization.adaptive_loss.bc_loss_weights[1] = α * discretization.adaptive_loss.bc_loss_weights[1] + (1 - α) * bc_loss_weight_new
-                @show discretization.adaptive_loss.bc_loss_weights[1]
+                discretization.adaptive_loss.pde_loss_weights .= α .* discretization.adaptive_loss.pde_loss_weights .+ (1 .- α) .* pde_loss_weights_new
+                discretization.adaptive_loss.bc_loss_weights .= α .* discretization.adaptive_loss.bc_loss_weights .+ (1 .- α) .* bc_loss_weights_new
+                @show discretization.adaptive_loss.pde_loss_weights
+                @show discretization.adaptive_loss.bc_loss_weights
             end
 
             nothing
@@ -1198,14 +1213,13 @@ function SciMLBase.discretize(pde_system::PDESystem, discretization::PhysicsInfo
 
     elseif discretization.adaptive_loss isa MiniMaxAdaptiveLoss
         # initialize adaptive loss data structures 
-        # TODO ZDM: initially assume one loss for pde and one loss for bc and one loss for additional, expand later
         println("In adaptive loss setup")
-        num_pde_loss = 1
-        num_bc_loss = 1
+        num_pde_losses = length(pde_loss_functions)
+        num_bc_losses = length(bc_loss_functions)
         num_additional_loss = additional_loss isa Nothing ? 0 : 1
 
-        discretization.adaptive_loss.pde_loss_weights = ones(Float32, num_pde_loss)
-        discretization.adaptive_loss.bc_loss_weights = ones(Float32, num_bc_loss)
+        discretization.adaptive_loss.pde_loss_weights = discretization.adaptive_loss.pde_weights_start .* ones(Float32, num_pde_losses)
+        discretization.adaptive_loss.bc_loss_weights = discretization.adaptive_loss.bc_weights_start .* ones(Float32, num_bc_losses)
         discretization.adaptive_loss.additional_loss_weights = ones(Float32, num_additional_loss)
 
         dump(discretization.adaptive_loss)
@@ -1216,14 +1230,15 @@ function SciMLBase.discretize(pde_system::PDESystem, discretization::PhysicsInfo
             if discretization.adaptive_loss.i % discretization.adaptive_loss.reweight_every == 0
                 println("Doing adaptive loss reweighting")
 
-                pde_loss = pde_loss_function(θ)
-                bc_loss  = bc_loss_function(θ)
+                pde_losses = [pde_loss_function(θ) for pde_loss_function in pde_loss_functions]
+                bc_losses = [bc_loss_function(θ) for bc_loss_function in bc_loss_functions]
 
-                α = discretization.adaptive_loss.α
-                discretization.adaptive_loss.pde_loss_weights[1] += α * pde_loss
-                discretization.adaptive_loss.bc_loss_weights[1] += α * bc_loss
-                @show discretization.adaptive_loss.pde_loss_weights[1]
-                @show discretization.adaptive_loss.bc_loss_weights[1]
+                α_pde = discretization.adaptive_loss.α_pde
+                α_bc = discretization.adaptive_loss.α_pde
+                discretization.adaptive_loss.pde_loss_weights .+= α_pde * pde_losses
+                discretization.adaptive_loss.bc_loss_weights .+= α_bc * bc_losses
+                @show discretization.adaptive_loss.pde_loss_weights
+                @show discretization.adaptive_loss.bc_loss_weights
             end
 
             nothing
@@ -1236,32 +1251,50 @@ function SciMLBase.discretize(pde_system::PDESystem, discretization::PhysicsInfo
         end
     end
 
-    exp_name = "stochastic_rescaled_in_pde_losses_1e3_1e_4_3e0"
+    exp_name = "minimax_spm_first"
     filename_bc_loss = "/home/zobot/.julia/dev/NeuralPDEWatson/data/$(exp_name)/bc_loss.csv"
     filename_pde_loss = "/home/zobot/.julia/dev/NeuralPDEWatson/data/$(exp_name)/pde_loss.csv"
+    filename_bc_weights = "/home/zobot/.julia/dev/NeuralPDEWatson/data/$(exp_name)/bc_weights.csv"
+    filename_pde_weights = "/home/zobot/.julia/dev/NeuralPDEWatson/data/$(exp_name)/pde_weights.csv"
     rm(filename_bc_loss; force=true)
     rm(filename_pde_loss; force=true)
+    rm(filename_bc_weights; force=true)
+    rm(filename_pde_weights; force=true)
     saveevery = 200
-    pde_loss_record = zeros(Float32, saveevery)
-    bc_loss_record = zeros(Float32, saveevery)
+    num_pde_losses = length(pde_loss_functions)
+    num_bc_losses = length(bc_loss_functions)
+    pde_loss_record = zeros(Float32, saveevery, num_pde_losses)
+    bc_loss_record = zeros(Float32, saveevery, num_bc_losses)
+    pde_weight_record = zeros(Float32, saveevery, num_pde_losses)
+    bc_weight_record = zeros(Float32, saveevery, num_bc_losses)
 
     function loss_function_(θ,p)
         Zygote.@ignore reweight_losses(θ)
         adaloss = discretization.adaptive_loss
 
-        weighted_pde_loss = adaloss.pde_loss_weights[1] * pde_loss_function(θ)
-        weighted_bc_loss = adaloss.bc_loss_weights[1] * bc_loss_function(θ)
+        pde_losses = [pde_loss_function(θ) for pde_loss_function in pde_loss_functions]
+        bc_losses = [bc_loss_function(θ) for bc_loss_function in bc_loss_functions]
+        weighted_pde_losses = adaloss.pde_loss_weights .* pde_losses
+        weighted_bc_losses = adaloss.bc_loss_weights .* bc_losses
 
         Zygote.@ignore begin
-            @show weighted_pde_loss
-            @show weighted_bc_loss
-            pde_loss_record[((adaloss.i - 1) % saveevery) + 1] = weighted_pde_loss
-            bc_loss_record[((adaloss.i - 1) % saveevery) + 1] = weighted_bc_loss
+            @show weighted_pde_losses
+            @show weighted_bc_losses
+            @show adaloss.pde_loss_weights
+            @show adaloss.bc_loss_weights
+            pde_loss_record[((adaloss.i - 1) % saveevery) + 1, :] = weighted_pde_losses
+            pde_weight_record[((adaloss.i - 1) % saveevery) + 1, :] = adaloss.pde_loss_weights
+            bc_loss_record[((adaloss.i - 1) % saveevery) + 1, :] = weighted_bc_losses
+            bc_weight_record[((adaloss.i - 1) % saveevery) + 1, :] = adaloss.bc_loss_weights
             if adaloss.i % saveevery == 0
-                df = DataFrame(pde_loss=pde_loss_record)
+                df = DataFrame(pde_loss_record)
                 CSV.write(filename_pde_loss, df, writeheader=false, append=true)
-                df = DataFrame(bc_loss=bc_loss_record)
+                df = DataFrame(bc_loss_record)
                 CSV.write(filename_bc_loss, df, writeheader=false, append=true)
+                df = DataFrame(pde_weight_record)
+                CSV.write(filename_pde_weights, df, writeheader=false, append=true)
+                df = DataFrame(bc_weight_record)
+                CSV.write(filename_bc_weights, df, writeheader=false, append=true)
             end
         end
 
@@ -1281,7 +1314,7 @@ function SciMLBase.discretize(pde_system::PDESystem, discretization::PhysicsInfo
             end
         end
 
-        full_loss = weighted_pde_loss + weighted_bc_loss + weighted_additional_loss
+        full_loss = sum(weighted_pde_losses) + sum(weighted_bc_losses) + weighted_additional_loss
         return full_loss
     end
 
