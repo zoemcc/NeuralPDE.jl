@@ -148,14 +148,15 @@ end
 
 struct ReturnOne end
 
-Base.getindex(ReturnOne, i) = 1
+Base.getindex(::ReturnOne, i) = 1
+Base.length(::ReturnOne) = 1
 mutable struct NonAdaptiveLossWeights <: AdaptiveLosses
     i::Int64
-    pde_loss_weights::ReturnOne
-    bc_loss_weights::ReturnOne 
-    additional_loss_weights::ReturnOne 
+    pde_loss_weights::Vector{Float32}
+    bc_loss_weights::Vector{Float32}
+    additional_loss_weights::Vector{Float32} 
     function NonAdaptiveLossWeights(i=0)
-        new(convert(Int64, i), ReturnOne(), ReturnOne(), ReturnOne())
+        new(convert(Int64, i), Float32[1f0], Float32[1f0], Float32[1f0])
     end
 end
 
@@ -1251,15 +1252,25 @@ function SciMLBase.discretize(pde_system::PDESystem, discretization::PhysicsInfo
         end
     end
 
-    exp_name = "minimax_spm_first"
-    filename_bc_loss = "/home/zobot/.julia/dev/NeuralPDEWatson/data/$(exp_name)/bc_loss.csv"
-    filename_pde_loss = "/home/zobot/.julia/dev/NeuralPDEWatson/data/$(exp_name)/pde_loss.csv"
-    filename_bc_weights = "/home/zobot/.julia/dev/NeuralPDEWatson/data/$(exp_name)/bc_weights.csv"
-    filename_pde_weights = "/home/zobot/.julia/dev/NeuralPDEWatson/data/$(exp_name)/pde_weights.csv"
-    rm(filename_bc_loss; force=true)
-    rm(filename_pde_loss; force=true)
-    rm(filename_bc_weights; force=true)
-    rm(filename_pde_weights; force=true)
+    @show discretization.kwargs
+    @show typeof(discretization.kwargs)
+    exp_name = get(discretization.kwargs, :exp_name, "default_exp_name")
+    @show exp_name
+    data_dir = get(discretization.kwargs, :data_dir, "/home/zobot/.julia/dev/NeuralPDEWatson/data/")
+    @show data_dir
+    exp_folder = joinpath(data_dir, exp_name)
+    @show exp_folder
+    !isdir(exp_folder) && mkdir(exp_folder)
+    filename_bc_loss = joinpath(exp_folder, "bc_loss.csv")
+    filename_pde_loss = joinpath(exp_folder, "pde_loss.csv")
+    filename_bc_weights = joinpath(exp_folder, "bc_weights.csv")
+    filename_pde_weights = joinpath(exp_folder, "pde_weights.csv")
+    if get(discretization.kwargs, :wipe, false)
+        rm(filename_bc_loss; force=true)
+        rm(filename_pde_loss; force=true)
+        rm(filename_bc_weights; force=true)
+        rm(filename_pde_weights; force=true)
+    end
     saveevery = 200
     num_pde_losses = length(pde_loss_functions)
     num_bc_losses = length(bc_loss_functions)
@@ -1282,10 +1293,10 @@ function SciMLBase.discretize(pde_system::PDESystem, discretization::PhysicsInfo
             @show weighted_bc_losses
             @show adaloss.pde_loss_weights
             @show adaloss.bc_loss_weights
-            pde_loss_record[((adaloss.i - 1) % saveevery) + 1, :] = weighted_pde_losses
-            pde_weight_record[((adaloss.i - 1) % saveevery) + 1, :] = adaloss.pde_loss_weights
-            bc_loss_record[((adaloss.i - 1) % saveevery) + 1, :] = weighted_bc_losses
-            bc_weight_record[((adaloss.i - 1) % saveevery) + 1, :] = adaloss.bc_loss_weights
+            pde_loss_record[((adaloss.i - 1) % saveevery) + 1, :] .= weighted_pde_losses
+            pde_weight_record[((adaloss.i - 1) % saveevery) + 1, :] .= adaloss.pde_loss_weights
+            bc_loss_record[((adaloss.i - 1) % saveevery) + 1, :] .= weighted_bc_losses
+            bc_weight_record[((adaloss.i - 1) % saveevery) + 1, :] .= adaloss.bc_loss_weights
             if adaloss.i % saveevery == 0
                 df = DataFrame(pde_loss_record)
                 CSV.write(filename_pde_loss, df, writeheader=false, append=true)
